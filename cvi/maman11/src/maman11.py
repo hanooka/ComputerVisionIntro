@@ -11,7 +11,6 @@ from sklearn.base import BaseEstimator, ClusterMixin
 
 np.set_printoptions(threshold=sys.maxsize)
 
-
 from sklearn.cluster import DBSCAN
 
 
@@ -35,6 +34,7 @@ def rotate_coordinates_with_matrix(points, rotation_matrix):
 
     # Return the rotated points
     return np.round(rotated_points).astype(int)
+
 
 def find_matching_points_kdtree(original_points, augmented_points, tolerance=5.0):
     """
@@ -60,6 +60,7 @@ def find_matching_points_kdtree(original_points, augmented_points, tolerance=5.0
 
     return match_count
 
+
 def rotate_coordinates(points, image_shape, angle):
     """
     Rotate a set of points around a given center.
@@ -73,7 +74,7 @@ def rotate_coordinates(points, image_shape, angle):
         np.ndarray: Array of rotated points as integers.
     """
     # Convert angle to radians
-    center = image_shape[1]//2, image_shape[0]//2
+    center = image_shape[1] // 2, image_shape[0] // 2
     angle_rad = np.radians(angle)
     cos_theta = np.cos(angle_rad)
     sin_theta = np.sin(angle_rad)
@@ -90,6 +91,7 @@ def rotate_coordinates(points, image_shape, angle):
     rotated_points = np.clip(np.round(rotated_points), a_min=0, a_max=np.inf).astype(int)
 
     return rotated_points
+
 
 def cluster_keypoints(keypoints, eps=5, min_samples=1):
     """
@@ -116,6 +118,7 @@ def cluster_keypoints(keypoints, eps=5, min_samples=1):
         clustered_keypoints.append(centroid)
 
     return np.clip(np.array(clustered_keypoints, dtype=int), a_min=0, a_max=np.inf)
+
 
 def apply_harris_detector(img: MatLike, block_size: int, ksize: int,
                           k: float = 0.04, th_factor=0.02) -> (MatLike, np.array):
@@ -147,7 +150,7 @@ def apply_fast_detector(
         img,
         th: int = 10, non_max_supr: bool = True,
         neighbors_type=cv2.FAST_FEATURE_DETECTOR_TYPE_9_16
-) -> MatLike:
+) -> (MatLike, Tuple[cv2.KeyPoint]):
     """
     :param img:
     :param th: threshold helps for corner detector. a higher threshold will result in less corners,
@@ -160,10 +163,10 @@ def apply_fast_detector(
     gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     fast = cv2.FastFeatureDetector()
     fast = fast.create(threshold=th, nonmaxSuppression=non_max_supr, type=neighbors_type)
-    key_points = fast.detect(gray_image)
-    output_image = cv2.drawKeypoints(img, key_points, None, color=(255, 0, 0),
+    kp = fast.detect(gray_image)
+    output_image = cv2.drawKeypoints(img, kp, None, color=(255, 0, 0),
                                      flags=cv2.DRAW_MATCHES_FLAGS_NOT_DRAW_SINGLE_POINTS)
-    return output_image
+    return output_image, kp
 
 
 def apply_orb_detector(img: MatLike, max_keypoints: int = 500):
@@ -228,31 +231,20 @@ def apply_akaze_detector(
     gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     akaze = cv2.AKAZE().create(descriptor_type, descriptor_size, descriptor_channels, th, n_octaves, n_octaves_layers)
     keypoints, descriptors = akaze.detectAndCompute(gray_image, None)
-    print(keypoints)
-    print(len(keypoints))
-    keypoints: Tuple[cv2.KeyPoint]
-    print(keypoints[0].size)
-    print(keypoints[0].octave)
-    print(keypoints[0].pt)
-    print(keypoints[0].angle)
-    print(keypoints[0].response)
-    print(keypoints[0].class_id)
-    print(type(keypoints[0]))
-    print(descriptors[0])
-    print(descriptors.shape)
-
     output_image = cv2.drawKeypoints(img, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
     return output_image, keypoints, descriptors
 
+
 def rescale_image(img: MatLike, scale) -> MatLike:
     """ Rescales image by scale factor. """
     h, w = img.shape[:2]
-    new_w = int(w*scale)
-    new_h = int(h*scale)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
     return cv2.resize(img, (new_w, new_h))
 
-def rotate_image(img: MatLike, angle: Union[float, int], scale: float=1.0) -> (MatLike, np.ndarray):
+
+def rotate_image(img: MatLike, angle: Union[float, int], scale: float = 1.0) -> (MatLike, np.ndarray):
     """ Rotating the image, with angle and re-scale factor.
     considering rotated image will create new height/width. """
     h, w = img.shape[:2]
@@ -267,6 +259,7 @@ def rotate_image(img: MatLike, angle: Union[float, int], scale: float=1.0) -> (M
     rotation_matrix[1, 2] += (new_height - w) / 2
     return cv2.warpAffine(img, rotation_matrix, (new_width, new_height)), orig_r_matrix
 
+
 def add_gaussian_noise(img: MatLike, mean=0, std_dev=2):
     """ Add gaussian noise using normal distribution. """
     noise = np.random.normal(mean, std_dev, img.shape).astype(np.float16)
@@ -274,7 +267,23 @@ def add_gaussian_noise(img: MatLike, mean=0, std_dev=2):
     return np.clip(noisy_image, 0, 255).astype(np.uint8)
 
 
+def find_harris_detectors_with_rotation():
+    _img, kp = apply_harris_detector(img, 2, 3, 0.04, 0.02)
+    kp = cluster_keypoints(keypoints=kp, eps=5, min_samples=1)
 
+    r_img, rotation_matrix = rotate_image(img, 90, 1)
+    r_img, r_kp = apply_harris_detector(r_img, 2, 3, 0.04, 0.02)
+
+    r_kp = rotate_coordinates_with_matrix(r_kp, rotation_matrix)
+    r_kp = cluster_keypoints(r_kp, eps=5, min_samples=1)
+
+    # Sorting them so it'll be easier to compare by "eye"
+    sorted_indices = np.lexsort((r_kp[:, 1], r_kp[:, 0]))
+    r_kp = r_kp[sorted_indices]
+
+    match_points = find_matching_points_kdtree(kp, r_kp, 5)
+    print(match_points)
+    print(len(kp))
 
 
 if __name__ == '__main__':
@@ -283,40 +292,17 @@ if __name__ == '__main__':
     for image_path in images_paths:
         img = cv2.imread(image_path)
         img = cv2.resize(img, (512, 512))
-        #img = add_gaussian_noise(img, 0, 40)
-        #img = cv2.GaussianBlur(img, ksize=(7, 7), sigmaX=1.)
-
-        _img, kp = apply_harris_detector(img, 2, 3, 0.04, 0.02)
-        kp = cluster_keypoints(keypoints=kp, eps=5, min_samples=1)
-        print(kp)
-        print()
-
-        r_img, rotation_matrix = rotate_image(img, 90, 1)
-        print(r_img.shape)
-        r_img, r_kp = apply_harris_detector(r_img, 2, 3, 0.04, 0.02)
-
-        r_kp = rotate_coordinates_with_matrix(r_kp, rotation_matrix)
-        r_kp = cluster_keypoints(r_kp, eps=5, min_samples=1)
-
-
-        sorted_indices = np.lexsort((r_kp[:, 1], r_kp[:, 0]))
-        r_kp = r_kp[sorted_indices]
-
-        print(r_kp)
-
-        match_points = find_matching_points_kdtree(kp, r_kp, 5)
-        print(match_points)
-        print(len(kp))
+        # img = add_gaussian_noise(img, 0, 40)
+        # img = cv2.GaussianBlur(img, ksize=(7, 7), sigmaX=1.)
 
 
         #_img = apply_fast_detector(img, th=20)
         #_img = apply_orb_detector(img, 100)
         #_img = apply_sift_detector(img)
-        #_img = apply_akaze_detector(img)
+        #_img, _, _ = apply_akaze_detector(img)
 
         # Display the result
         cv2.imshow('image', _img)
         cv2.waitKey(0)
-        cv2.imshow('image', r_img)
-        cv2.waitKey(0)
+
         cv2.destroyAllWindows()
