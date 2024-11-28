@@ -1,10 +1,16 @@
-from typing import Tuple, Union
+import functools
+import pickle
+from collections import defaultdict
+from typing import Tuple, Union, List
 import sys
 
 import cv2
 import glob
 
 import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
 from cv2.typing import MatLike
 from scipy.spatial import cKDTree
 from sklearn.base import BaseEstimator, ClusterMixin
@@ -14,83 +20,29 @@ np.set_printoptions(threshold=sys.maxsize)
 from sklearn.cluster import DBSCAN
 
 
-def rotate_coordinates_with_matrix(points, rotation_matrix):
+def rotate_coordinates_back(points, rotation_matrix, original_shape):
     """
-    Rotate a set of points using a precomputed rotation matrix.
+    Rotate points from a rotated image back to the original image's coordinate system.
 
     Parameters:
         points (np.ndarray): Array of points as (x, y).
-        rotation_matrix (np.ndarray): 2x3 rotation matrix from cv2.getRotationMatrix2D.
+        rotation_matrix (np.ndarray): Rotation matrix used to create the rotated image.
+        original_shape (tuple): Original image dimensions as (height, width).
 
     Returns:
-        np.ndarray: Array of rotated points as (x', y').
+        np.ndarray: Array of points rotated back to the original coordinate system.
     """
-    # Add a column of ones to the points array for affine transformation
-    ones = np.ones((points.shape[0], 1))
-    points_homogeneous = np.hstack([points, ones])
+    # Invert the rotation matrix
+    original_h, original_w = original_shape
 
-    # Apply the rotation matrix
-    rotated_points = np.dot(points_homogeneous, rotation_matrix.T)
+    rotation_matrix_inv = cv2.invertAffineTransform(rotation_matrix)
+    homogeneous_coords = np.column_stack([points, np.ones(len(points))])
+    transformed_coords = np.dot(rotation_matrix_inv, homogeneous_coords.T).T
 
-    # Return the rotated points
-    return np.round(rotated_points).astype(int)
-
-
-def find_matching_points_kdtree(original_points, augmented_points, tolerance=5.0):
-    """
-    Finds matches between original and augmented keypoints using a k-d tree.
-
-    Parameters:
-        original_points (np.ndarray): Transformed original keypoints.
-        augmented_points (np.ndarray): Detected keypoints in the augmented image.
-        tolerance (float): Maximum distance to consider a match.
-
-    Returns:
-        int: Count of matching points.
-    """
-    # Build k-d tree from rotated points
-    tree = cKDTree(augmented_points)
-
-    # Query for nearest neighbors within the tolerance radius
-    match_count = 0
-    for point in original_points:
-        distances, indices = tree.query(point, k=1, distance_upper_bound=tolerance)
-        if distances != np.inf:  # Valid match
-            match_count += 1
-
-    return match_count
-
-
-def rotate_coordinates(points, image_shape, angle):
-    """
-    Rotate a set of points around a given center.
-
-    Parameters:
-        points (np.ndarray): Array of points as (x, y).
-        image_shape (tuple): numpy array that will help us calculate center
-        angle (float): Rotation angle in degrees.
-
-    Returns:
-        np.ndarray: Array of rotated points as integers.
-    """
-    # Convert angle to radians
-    center = image_shape[1] // 2, image_shape[0] // 2
-    angle_rad = np.radians(angle)
-    cos_theta = np.cos(angle_rad)
-    sin_theta = np.sin(angle_rad)
-
-    # Create rotation matrix
-    rotation_matrix = np.array([
-        [cos_theta, -sin_theta],
-        [sin_theta, cos_theta]
-    ])
-
-    shifted_points = points - center
-    rotated_points = np.dot(shifted_points, rotation_matrix.T)
-    rotated_points += center
-    rotated_points = np.clip(np.round(rotated_points), a_min=0, a_max=np.inf).astype(int)
-
-    return rotated_points
+    transformed_coords = np.clip(
+        transformed_coords, [0, 0], [original_w - 1, original_h - 1]
+    )
+    return transformed_coords
 
 
 def cluster_keypoints(keypoints, eps=5, min_samples=1):
@@ -107,7 +59,7 @@ def cluster_keypoints(keypoints, eps=5, min_samples=1):
     """
     clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(keypoints)
     unique_labels = set(clustering.labels_)
-    print(unique_labels)
+    # print(unique_labels)
     clustered_keypoints = []
 
     for label in unique_labels:
@@ -120,7 +72,7 @@ def cluster_keypoints(keypoints, eps=5, min_samples=1):
     return np.clip(np.array(clustered_keypoints, dtype=int), a_min=0, a_max=np.inf)
 
 
-def apply_harris_detector(img: MatLike, block_size: int, ksize: int,
+def apply_harris_detector(img: MatLike, block_size: int = 2, ksize: int = 3,
                           k: float = 0.04, th_factor=0.02) -> (MatLike, np.array):
     """
     :param img: the given image, with no assumptions.
@@ -172,15 +124,15 @@ def apply_fast_detector(
 def apply_orb_detector(img: MatLike, max_keypoints: int = 500):
     gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     orb = cv2.ORB().create(nfeatures=max_keypoints)
-    key_points = orb.detect(gray_image, None)
+    kp, descriptors = orb.detectAndCompute(gray_image, None)
     output_image = cv2.drawKeypoints(
         img,
-        key_points,
+        kp,
         None,
         color=(0, 255, 0),  # Green color for keypoints
         flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
     )
-    return output_image
+    return output_image, kp, descriptors
 
 
 def apply_sift_detector(
@@ -194,7 +146,7 @@ def apply_sift_detector(
     Not working for some reason, I have a c++ "unknown exception" which I didn't dwelve to solve
     histogram of gradient in image. => Robust to overall change. fully affine invariant.
     """
-    gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray_image = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     sift = cv2.SIFT()
     sift.create(nfeatures=nfeatures, nOctaveLayers=nOctaveLayers,
                 contrastThreshold=contrastThreshold, edgeThreshold=edgeThreshold, sigma=sigma)
@@ -236,12 +188,12 @@ def apply_akaze_detector(
     return output_image, keypoints, descriptors
 
 
-def rescale_image(img: MatLike, scale) -> MatLike:
+def rescale_image(img: MatLike, scale) -> (MatLike, None):
     """ Rescales image by scale factor. """
     h, w = img.shape[:2]
     new_w = int(w * scale)
     new_h = int(h * scale)
-    return cv2.resize(img, (new_w, new_h))
+    return cv2.resize(img, (new_w, new_h)), scale
 
 
 def rotate_image(img: MatLike, angle: Union[float, int], scale: float = 1.0) -> (MatLike, np.ndarray):
@@ -250,59 +202,211 @@ def rotate_image(img: MatLike, angle: Union[float, int], scale: float = 1.0) -> 
     h, w = img.shape[:2]
     center = (w // 2, h // 2)
     rotation_matrix = cv2.getRotationMatrix2D(center, angle, scale)
-    orig_r_matrix = rotation_matrix.copy()
     cos_theta = abs(rotation_matrix[0, 0])
     sin_theta = abs(rotation_matrix[0, 1])
     new_width = int(h * sin_theta + w * cos_theta)
     new_height = int(h * cos_theta + w * sin_theta)
     rotation_matrix[0, 2] += (new_width - w) / 2
     rotation_matrix[1, 2] += (new_height - w) / 2
-    return cv2.warpAffine(img, rotation_matrix, (new_width, new_height)), orig_r_matrix
+    return cv2.warpAffine(img, rotation_matrix, (new_width, new_height)), rotation_matrix
 
 
-def add_gaussian_noise(img: MatLike, mean=0, std_dev=2):
+def add_gaussian_noise(img: MatLike, mean=0, std_dev=2) -> (MatLike, None):
     """ Add gaussian noise using normal distribution. """
     noise = np.random.normal(mean, std_dev, img.shape).astype(np.float16)
     noisy_image = img.astype(np.float16) + noise
-    return np.clip(noisy_image, 0, 255).astype(np.uint8)
+    return np.clip(noisy_image, 0, 255).astype(np.uint8), None
 
 
-def find_harris_detectors_with_rotation():
-    _img, kp = apply_harris_detector(img, 2, 3, 0.04, 0.02)
-    kp = cluster_keypoints(keypoints=kp, eps=5, min_samples=1)
-
-    r_img, rotation_matrix = rotate_image(img, 90, 1)
-    r_img, r_kp = apply_harris_detector(r_img, 2, 3, 0.04, 0.02)
-
-    r_kp = rotate_coordinates_with_matrix(r_kp, rotation_matrix)
-    r_kp = cluster_keypoints(r_kp, eps=5, min_samples=1)
-
-    # Sorting them so it'll be easier to compare by "eye"
-    sorted_indices = np.lexsort((r_kp[:, 1], r_kp[:, 0]))
-    r_kp = r_kp[sorted_indices]
-
-    match_points = find_matching_points_kdtree(kp, r_kp, 5)
-    print(match_points)
-    print(len(kp))
+def transform_ndarray_kp_to_cv2_kp(kp_ndarray: np.ndarray) -> List[cv2.KeyPoint]:
+    return [cv2.KeyPoint(x=float(point[0]), y=float(point[1]), size=1) for point in kp_ndarray]
 
 
-if __name__ == '__main__':
-    images_paths = glob.glob("../data/ist*")
+def find_descriptors_with_brief(img: MatLike, kp: Tuple[cv2.KeyPoint]):
+    brief = cv2.xfeatures2d.BriefDescriptorExtractor().create()
+    _kp, descriptors = brief.compute(img, kp)
+    return _kp, descriptors
+
+
+def apply_fast_with_brief(img, **kwargs):
+    output_img, kp = apply_fast_detector(img, **kwargs)
+    kp, descriptors = find_descriptors_with_brief(img, kp)
+    return output_img, kp, descriptors
+
+
+def apply_harris_with_brief(img, **kwargs):
+    output_img, kp_ndarray = apply_harris_detector(img, **kwargs)
+    kp = transform_ndarray_kp_to_cv2_kp(kp_ndarray)
+    kp, descriptors = find_descriptors_with_brief(img, kp)
+    return output_img, kp, descriptors
+
+
+def calc_evaluators(img, detector_descriptor, augmentation, augmentation_str: str, matcher, rad_th=5.):
+    output_img, kp, descriptors = detector_descriptor(img)
+    aug_img, additional_data = augmentation(img)
+    aug_output_img, aug_kp, aug_descriptors = detector_descriptor(aug_img)
+
+    # cv2.imshow('image', output_img)
+    # cv2.waitKey(0)
+    # cv2.imshow('image', aug_output_img)
+    # cv2.waitKey(0)
+
+    matches = matcher.match(descriptors, aug_descriptors)
+    # print(matches)
+
+    matches = sorted(matches, key=lambda x: x.distance)
+    kp_matched = np.array([kp[m.queryIdx].pt for m in matches])
+    aug_kp_matched = np.array([aug_kp[m.trainIdx].pt for m in matches])
+
+    if 'rotate' in augmentation_str:
+        aug_kp_matched = rotate_coordinates_back(aug_kp_matched, additional_data, img.shape[:2])
+    if 'scale' in augmentation_str:
+        aug_kp_matched = aug_kp_matched / additional_data
+
+    # print(np.hstack((kp_matched, aug_kp_matched)))
+
+    # Calculate Euclidean distance between matched keypoints
+    distances = np.linalg.norm(kp_matched - aug_kp_matched, axis=1)
+
+    # Count matches within the threshold
+    repeatable_matches = np.sum(distances <= rad_th)
+    # print(repeatable_matches)
+    repeatability = repeatable_matches / len(kp)
+
+    print(f"Repeatability: {repeatability:.4f}")
+
+    valid_distances = distances[distances <= rad_th]
+    if valid_distances.size > 0:
+        average_distance = np.mean(valid_distances)
+    else:
+        average_distance = None
+    print("Average Distance", average_distance)
+
+    return {
+        "repeatability": repeatability,
+        "localization_error": average_distance
+    }
+
+
+augmentations = {
+    "gauss_noise_10": lambda img: add_gaussian_noise(img, 0, 10),
+    "gauss_noise_20": lambda img: add_gaussian_noise(img, 0, 20),
+    "rotate_30": lambda img: rotate_image(img, 30, 1),
+    "rotate_70": lambda img: rotate_image(img, 70, 1),
+    "scale_half": lambda img: rescale_image(img, 0.5),
+    "scale_2": lambda img: rescale_image(img, 2),
+    "gauss_filter_5": lambda img: (cv2.GaussianBlur(img, ksize=(5, 5), sigmaX=1.), None),
+    "gauss_filter_9": lambda img: (cv2.GaussianBlur(img, ksize=(9, 9), sigmaX=1.), None),
+}
+
+bf_hamm = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+bf_l2norm = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+
+detector_descriptor_matcher = {
+    # "harris_brief": (lambda img: apply_harris_with_brief(img), bf_l2norm),
+    "orb": (lambda img: apply_orb_detector(img, 200), bf_hamm),
+    "fast_brief": (lambda img: apply_fast_with_brief(img), bf_hamm),
+    "akaze": (lambda img: apply_akaze_detector(img), bf_l2norm),
+}
+
+
+def run_eval(images_paths):
+    #accumulator = defaultdict(dict)
+    accumulator = defaultdict(lambda: defaultdict(lambda: {'repeatability': [], 'localization_error': []}))
 
     for image_path in images_paths:
         img = cv2.imread(image_path)
         img = cv2.resize(img, (512, 512))
-        # img = add_gaussian_noise(img, 0, 40)
-        # img = cv2.GaussianBlur(img, ksize=(7, 7), sigmaX=1.)
+
+        for dd_key, (dd, matcher) in detector_descriptor_matcher.items():
+            #accumulator[dd_key] = defaultdict(dict)
+            print(f"---------\n{dd_key}\n----------")
+            for aug_str, aug_func in augmentations.items():
+                #accumulator[dd_key][aug_str] = defaultdict(list)
+                print(aug_str)
+                evaluators = calc_evaluators(img, dd, aug_func, aug_str, matcher)
+                accumulator[dd_key][aug_str]['repeatability'].append(evaluators['repeatability'])
+                accumulator[dd_key][aug_str]['localization_error'].append(evaluators['localization_error'])
+
+    # with open("accum.pickle", "wb") as f:
+    #     pickle.dump(accumulator, f)
+
+    print(accumulator)
+    df = accumulator_to_df(accumulator)
+    print(df)
+    print(df.head())
+    print(list(df))
+
+    plt.figure(figsize=(10, 6))
+
+    # Prepare data for plotting repeatability
+    repeatability_data = df[
+        ['augmentation', 'Algorithm 1_repeatability', 'Algorithm 2_repeatability', 'Algorithm 3_repeatability']]
+
+    # Plot bars for each algorithm
+    x = np.arange(len(repeatability_data))  # position for bars on x-axis
+    bar_width = 0.2  # Width of bars
+    plt.bar(x - bar_width, repeatability_data['Algorithm 1_repeatability'], width=bar_width, label='Algorithm 1',
+            color='b')
+    plt.bar(x, repeatability_data['Algorithm 2_repeatability'], width=bar_width, label='Algorithm 2', color='g')
+    plt.bar(x + bar_width, repeatability_data['Algorithm 3_repeatability'], width=bar_width, label='Algorithm 3',
+            color='r')
+
+    # Labeling
+    plt.xlabel('Augmentation Type')
+    plt.ylabel('Repeatability')
+    plt.title('Repeatability for Different Algorithms and Augmentations')
+    plt.xticks(x, repeatability_data['augmentation'], rotation=45)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # Plotting Localization Error (one plot for localization error)
+    plt.figure(figsize=(10, 6))
+
+    # Prepare data for plotting localization error
+    localization_error_data = df[['augmentation', 'Algorithm 1_localization_error', 'Algorithm 2_localization_error',
+                                  'Algorithm 3_localization_error']]
+
+    # Plot bars for each algorithm
+    plt.bar(x - bar_width, localization_error_data['Algorithm 1_localization_error'], width=bar_width,
+            label='Algorithm 1', color='b')
+    plt.bar(x, localization_error_data['Algorithm 2_localization_error'], width=bar_width, label='Algorithm 2',
+            color='g')
+    plt.bar(x + bar_width, localization_error_data['Algorithm 3_localization_error'], width=bar_width,
+            label='Algorithm 3', color='r')
+
+    # Labeling
+    plt.xlabel('Augmentation Type')
+    plt.ylabel('Localization Error')
+    plt.title('Localization Error for Different Algorithms and Augmentations')
+    plt.xticks(x, localization_error_data['augmentation'], rotation=45)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
 
-        #_img = apply_fast_detector(img, th=20)
-        #_img = apply_orb_detector(img, 100)
-        #_img = apply_sift_detector(img)
-        #_img, _, _ = apply_akaze_detector(img)
+def accumulator_to_df(accumulator):
+    rows = []
+    for detector, noise_data in accumulator.items():
+        for noise_type, metrics in noise_data.items():
+            for metric_name, values in metrics.items():
+                for idx, value in enumerate(values):
+                    rows.append({
+                        'detector': detector,
+                        'noise_type': noise_type,
+                        'metric': metric_name,
+                        'index': idx,
+                        'value': value
+                    })
+    df = pd.DataFrame(rows)
+    return df
 
-        # Display the result
-        cv2.imshow('image', _img)
-        cv2.waitKey(0)
 
-        cv2.destroyAllWindows()
+
+
+
+
+if __name__ == '__main__':
+    images_paths = glob.glob("../data/*")
+    run_eval(images_paths)
