@@ -1,3 +1,4 @@
+import os
 import time
 from collections import defaultdict
 from typing import Tuple, Union, List, Protocol, Any, Callable, Sequence
@@ -266,7 +267,6 @@ def calc_evaluators(
         augmentation_str: str,
         matcher: cv2.DescriptorMatcher,
         rad_th: Union[float, int] = 5.) -> dict:
-
     start_time = time.time()
     output_img, kp, descriptors = detector_descriptor(img)
     aug_img, additional_data = augmentation(img)
@@ -323,7 +323,7 @@ def calculate_matcher_precision(matches, rad_th):
             true_positives += 1
         else:
             false_positives += 1
-    return  true_positives / (true_positives + false_positives)
+    return true_positives / (true_positives + false_positives)
 
 
 def run_eval(images_paths, detector_descriptor_matcher, augmentations, image_rescale=None):
@@ -345,7 +345,6 @@ def run_eval(images_paths, detector_descriptor_matcher, augmentations, image_res
                 for k, v in evaluators.items():
                     accumulator[dd_key][aug_str][k].append(v)
 
-
     df = accumulator_to_df(accumulator)
     df.to_csv("accum_df.csv", index=False)
 
@@ -362,7 +361,6 @@ def plot_detector_noise_summary(
         category_column='noise_type',
         metric_column='metric',
         value_column='value'):
-
     df = df[df[metric_column] == metric_value]
     df = df.fillna(0)
     # groupby detector and noise_type, calculates the mean for the metric
@@ -407,7 +405,8 @@ def main(**args):
         "fast_brief": (lambda img: apply_fast_with_brief(img), bf_hamm),
         "akaze": (lambda img: apply_akaze_detector(img), bf_l2norm),
     }
-    images_paths = glob.glob("../data/*")
+    glob_path = os.path.abspath(os.path.join(__file__, "../../data", '*'))
+    images_paths = glob.glob(glob_path)
     run_eval(images_paths, detector_descriptor_matcher, augmentations, **args)
 
 
