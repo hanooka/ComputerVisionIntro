@@ -1,7 +1,6 @@
-import functools
-import pickle
+import time
 from collections import defaultdict
-from typing import Tuple, Union, List
+from typing import Tuple, Union, List, Protocol, Any, Callable, Sequence
 import sys
 
 import cv2
@@ -12,13 +11,15 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from cv2.typing import MatLike
-from scipy.spatial import cKDTree
-from sklearn.base import BaseEstimator, ClusterMixin
 
 np.set_printoptions(threshold=sys.maxsize)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
 
-from sklearn.cluster import DBSCAN
 
+#########################
+### HELPERS FUNCTIONS ###
+#########################
 
 def rotate_coordinates_back(points, rotation_matrix, original_shape):
     """
@@ -45,32 +46,38 @@ def rotate_coordinates_back(points, rotation_matrix, original_shape):
     return transformed_coords
 
 
-def cluster_keypoints(keypoints, eps=5, min_samples=1):
-    """
-    Cluster keypoints using DBSCAN to merge nearby points.
+def transform_ndarray_kp_to_cv2_kp(kp_ndarray: np.ndarray) -> List[cv2.KeyPoint]:
+    """ Transforming np.ndarray into iterable of cv2 keypoints.
+    Originally constracted to handle harris corner detector. """
+    return [cv2.KeyPoint(x=float(point[0]), y=float(point[1]), size=1) for point in kp_ndarray]
 
-    Parameters:
-        keypoints (np.ndarray): Array of detected keypoints as (x, y).
-        eps (float): Maximum distance between points to form a cluster.
-        min_samples (int): Minimum points in a cluster.
 
-    Returns:
-        np.ndarray: Array of clustered keypoints as (x, y).
-    """
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(keypoints)
-    unique_labels = set(clustering.labels_)
-    # print(unique_labels)
-    clustered_keypoints = []
+def find_descriptors_with_brief(img: MatLike, kp: Sequence[cv2.KeyPoint]):
+    brief = cv2.xfeatures2d.BriefDescriptorExtractor().create()
+    _kp, descriptors = brief.compute(img, kp)
+    return _kp, descriptors
 
-    for label in unique_labels:
-        if label == -1:  # Noise points, optionally handle separately
-            continue
-        cluster = keypoints[clustering.labels_ == label]
-        centroid = cluster.mean(axis=0)  # Compute the cluster centroid
-        clustered_keypoints.append(centroid)
 
-    return np.clip(np.array(clustered_keypoints, dtype=int), a_min=0, a_max=np.inf)
+def accumulator_to_df(accumulator):
+    """ Transforming the accumulator object into a pandas dataframe. """
+    rows = []
+    for detector, noise_data in accumulator.items():
+        for noise_type, metrics in noise_data.items():
+            for metric_name, values in metrics.items():
+                for idx, value in enumerate(values):
+                    rows.append({
+                        'detector': detector,
+                        'noise_type': noise_type,
+                        'metric': metric_name,
+                        'index': idx,
+                        'value': value
+                    })
+    return pd.DataFrame(rows)
 
+
+##############################
+#### DETECTORS DESCRIPTORS ###
+##############################
 
 def apply_harris_detector(img: MatLike, block_size: int = 2, ksize: int = 3,
                           k: float = 0.04, th_factor=0.02) -> (MatLike, np.array):
@@ -125,13 +132,10 @@ def apply_orb_detector(img: MatLike, max_keypoints: int = 500):
     gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     orb = cv2.ORB().create(nfeatures=max_keypoints)
     kp, descriptors = orb.detectAndCompute(gray_image, None)
-    output_image = cv2.drawKeypoints(
-        img,
-        kp,
-        None,
-        color=(0, 255, 0),  # Green color for keypoints
-        flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-    )
+    output_image = cv2.drawKeypoints(img, kp, None,
+                                     color=(0, 255, 0),  # Green color for keypoints
+                                     flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+                                     )
     return output_image, kp, descriptors
 
 
@@ -188,6 +192,41 @@ def apply_akaze_detector(
     return output_image, keypoints, descriptors
 
 
+def apply_fast_with_brief(img, **kwargs):
+    """ Applying FAST, use FAST kp into BRIEF to get descriptors.
+    Not the best approach as we have ORB that use few modification to apply the methods in a better fashion. """
+    output_img, kp = apply_fast_detector(img, **kwargs)
+    kp, descriptors = find_descriptors_with_brief(img, kp)
+    return output_img, kp, descriptors
+
+
+def apply_harris_with_brief(img, **kwargs):
+    """ Was a complete failure. """
+    output_img, kp_ndarray = apply_harris_detector(img, **kwargs)
+    kp = transform_ndarray_kp_to_cv2_kp(kp_ndarray)
+    kp, descriptors = find_descriptors_with_brief(img, kp)
+    return output_img, kp, descriptors
+
+
+#######################################
+######## AUGMENTATION FUNCTIONS #######
+#######################################
+
+
+class Augmentation(Protocol):
+    is_augmentation: bool  # Ensures the function has the `is_augmentation` attribute
+
+    def __call__(self, img: MatLike, *args, **kwargs) -> (Any, Any):
+        ...
+
+
+# Decorator
+def augmentation_function(func):
+    func.is_augmentation = True
+    return func
+
+
+@augmentation_function
 def rescale_image(img: MatLike, scale) -> (MatLike, None):
     """ Rescales image by scale factor. """
     h, w = img.shape[:2]
@@ -196,6 +235,7 @@ def rescale_image(img: MatLike, scale) -> (MatLike, None):
     return cv2.resize(img, (new_w, new_h)), scale
 
 
+@augmentation_function
 def rotate_image(img: MatLike, angle: Union[float, int], scale: float = 1.0) -> (MatLike, np.ndarray):
     """ Rotating the image, with angle and re-scale factor.
     considering rotated image will create new height/width. """
@@ -211,6 +251,7 @@ def rotate_image(img: MatLike, angle: Union[float, int], scale: float = 1.0) -> 
     return cv2.warpAffine(img, rotation_matrix, (new_width, new_height)), rotation_matrix
 
 
+@augmentation_function
 def add_gaussian_noise(img: MatLike, mean=0, std_dev=2) -> (MatLike, None):
     """ Add gaussian noise using normal distribution. """
     noise = np.random.normal(mean, std_dev, img.shape).astype(np.float16)
@@ -218,195 +259,163 @@ def add_gaussian_noise(img: MatLike, mean=0, std_dev=2) -> (MatLike, None):
     return np.clip(noisy_image, 0, 255).astype(np.uint8), None
 
 
-def transform_ndarray_kp_to_cv2_kp(kp_ndarray: np.ndarray) -> List[cv2.KeyPoint]:
-    return [cv2.KeyPoint(x=float(point[0]), y=float(point[1]), size=1) for point in kp_ndarray]
+def calc_evaluators(
+        img,
+        detector_descriptor,
+        augmentation: Union[Augmentation, Callable],
+        augmentation_str: str,
+        matcher: cv2.DescriptorMatcher,
+        rad_th: Union[float, int] = 5.) -> dict:
 
-
-def find_descriptors_with_brief(img: MatLike, kp: Tuple[cv2.KeyPoint]):
-    brief = cv2.xfeatures2d.BriefDescriptorExtractor().create()
-    _kp, descriptors = brief.compute(img, kp)
-    return _kp, descriptors
-
-
-def apply_fast_with_brief(img, **kwargs):
-    output_img, kp = apply_fast_detector(img, **kwargs)
-    kp, descriptors = find_descriptors_with_brief(img, kp)
-    return output_img, kp, descriptors
-
-
-def apply_harris_with_brief(img, **kwargs):
-    output_img, kp_ndarray = apply_harris_detector(img, **kwargs)
-    kp = transform_ndarray_kp_to_cv2_kp(kp_ndarray)
-    kp, descriptors = find_descriptors_with_brief(img, kp)
-    return output_img, kp, descriptors
-
-
-def calc_evaluators(img, detector_descriptor, augmentation, augmentation_str: str, matcher, rad_th=5.):
+    start_time = time.time()
     output_img, kp, descriptors = detector_descriptor(img)
     aug_img, additional_data = augmentation(img)
     aug_output_img, aug_kp, aug_descriptors = detector_descriptor(aug_img)
 
-    # cv2.imshow('image', output_img)
-    # cv2.waitKey(0)
-    # cv2.imshow('image', aug_output_img)
-    # cv2.waitKey(0)
-
     matches = matcher.match(descriptors, aug_descriptors)
-    # print(matches)
-
     matches = sorted(matches, key=lambda x: x.distance)
+
+    matcher_precision = calculate_matcher_precision(matches, rad_th)
+
+    calculation_time = time.time() - start_time
+
     kp_matched = np.array([kp[m.queryIdx].pt for m in matches])
     aug_kp_matched = np.array([aug_kp[m.trainIdx].pt for m in matches])
 
+    # Handle special cases of augmentation with respect to key points.
     if 'rotate' in augmentation_str:
         aug_kp_matched = rotate_coordinates_back(aug_kp_matched, additional_data, img.shape[:2])
     if 'scale' in augmentation_str:
         aug_kp_matched = aug_kp_matched / additional_data
-
-    # print(np.hstack((kp_matched, aug_kp_matched)))
 
     # Calculate Euclidean distance between matched keypoints
     distances = np.linalg.norm(kp_matched - aug_kp_matched, axis=1)
 
     # Count matches within the threshold
     repeatable_matches = np.sum(distances <= rad_th)
-    # print(repeatable_matches)
-    repeatability = repeatable_matches / len(kp)
 
-    print(f"Repeatability: {repeatability:.4f}")
+    repeatability = repeatable_matches / len(kp)
 
     valid_distances = distances[distances <= rad_th]
     if valid_distances.size > 0:
         average_distance = np.mean(valid_distances)
     else:
         average_distance = None
+
     print("Average Distance", average_distance)
+    print(f"Repeatability: {repeatability:.4f}")
+    print(f"Match precision: {matcher_precision:.4f}")
+    print(f"Calculation time: {calculation_time:.4f}")
 
     return {
         "repeatability": repeatability,
-        "localization_error": average_distance
+        "localization_error": average_distance,
+        "match_precision": matcher_precision,
+        "calculation_time": calculation_time
     }
 
 
-augmentations = {
-    "gauss_noise_10": lambda img: add_gaussian_noise(img, 0, 10),
-    "gauss_noise_20": lambda img: add_gaussian_noise(img, 0, 20),
-    "rotate_30": lambda img: rotate_image(img, 30, 1),
-    "rotate_70": lambda img: rotate_image(img, 70, 1),
-    "scale_half": lambda img: rescale_image(img, 0.5),
-    "scale_2": lambda img: rescale_image(img, 2),
-    "gauss_filter_5": lambda img: (cv2.GaussianBlur(img, ksize=(5, 5), sigmaX=1.), None),
-    "gauss_filter_9": lambda img: (cv2.GaussianBlur(img, ksize=(9, 9), sigmaX=1.), None),
-}
-
-bf_hamm = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-bf_l2norm = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
-
-detector_descriptor_matcher = {
-    # "harris_brief": (lambda img: apply_harris_with_brief(img), bf_l2norm),
-    "orb": (lambda img: apply_orb_detector(img, 200), bf_hamm),
-    "fast_brief": (lambda img: apply_fast_with_brief(img), bf_hamm),
-    "akaze": (lambda img: apply_akaze_detector(img), bf_l2norm),
-}
+def calculate_matcher_precision(matches, rad_th):
+    true_positives = 0
+    false_positives = 0
+    for match in matches:
+        if match.distance < rad_th:
+            true_positives += 1
+        else:
+            false_positives += 1
+    return  true_positives / (true_positives + false_positives)
 
 
-def run_eval(images_paths):
-    #accumulator = defaultdict(dict)
-    accumulator = defaultdict(lambda: defaultdict(lambda: {'repeatability': [], 'localization_error': []}))
+def run_eval(images_paths, detector_descriptor_matcher, augmentations, image_rescale=None):
+    # accumulator = defaultdict(dict)
+    accumulator = defaultdict(lambda: defaultdict(lambda: {
+        'repeatability': [], 'localization_error': [], 'match_precision': [], 'calculation_time': []}))
 
     for image_path in images_paths:
         img = cv2.imread(image_path)
-        img = cv2.resize(img, (512, 512))
+
+        if image_rescale and len(image_rescale) == 2:
+            img = cv2.resize(img, image_rescale)
 
         for dd_key, (dd, matcher) in detector_descriptor_matcher.items():
-            #accumulator[dd_key] = defaultdict(dict)
             print(f"---------\n{dd_key}\n----------")
             for aug_str, aug_func in augmentations.items():
-                #accumulator[dd_key][aug_str] = defaultdict(list)
                 print(aug_str)
                 evaluators = calc_evaluators(img, dd, aug_func, aug_str, matcher)
-                accumulator[dd_key][aug_str]['repeatability'].append(evaluators['repeatability'])
-                accumulator[dd_key][aug_str]['localization_error'].append(evaluators['localization_error'])
+                for k, v in evaluators.items():
+                    accumulator[dd_key][aug_str][k].append(v)
 
-    # with open("accum.pickle", "wb") as f:
-    #     pickle.dump(accumulator, f)
 
-    print(accumulator)
     df = accumulator_to_df(accumulator)
-    print(df)
-    print(df.head())
-    print(list(df))
+    df.to_csv("accum_df.csv", index=False)
 
-    plt.figure(figsize=(10, 6))
+    plot_detector_noise_summary(df, metric_value='repeatability')
+    plot_detector_noise_summary(df, metric_value='localization_error')
+    plot_detector_noise_summary(df, metric_value='match_precision')
+    plot_detector_noise_summary(df, metric_value='calculation_time')
 
-    # Prepare data for plotting repeatability
-    repeatability_data = df[
-        ['augmentation', 'Algorithm 1_repeatability', 'Algorithm 2_repeatability', 'Algorithm 3_repeatability']]
 
-    # Plot bars for each algorithm
-    x = np.arange(len(repeatability_data))  # position for bars on x-axis
-    bar_width = 0.2  # Width of bars
-    plt.bar(x - bar_width, repeatability_data['Algorithm 1_repeatability'], width=bar_width, label='Algorithm 1',
-            color='b')
-    plt.bar(x, repeatability_data['Algorithm 2_repeatability'], width=bar_width, label='Algorithm 2', color='g')
-    plt.bar(x + bar_width, repeatability_data['Algorithm 3_repeatability'], width=bar_width, label='Algorithm 3',
-            color='r')
+def plot_detector_noise_summary(
+        df,
+        metric_value='localization_error',
+        group_column='detector',
+        category_column='noise_type',
+        metric_column='metric',
+        value_column='value'):
 
-    # Labeling
-    plt.xlabel('Augmentation Type')
-    plt.ylabel('Repeatability')
-    plt.title('Repeatability for Different Algorithms and Augmentations')
-    plt.xticks(x, repeatability_data['augmentation'], rotation=45)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    df = df[df[metric_column] == metric_value]
+    df = df.fillna(0)
+    # groupby detector and noise_type, calculates the mean for the metric
+    summary = df.groupby([group_column, category_column])[value_column].mean().reset_index()
+    print(f"{metric_value} summary:\n{summary}")
 
-    # Plotting Localization Error (one plot for localization error)
-    plt.figure(figsize=(10, 6))
+    # Pivot for plotting: detectors as bars for each noise_type
+    pivot_summary = summary.pivot(index=category_column, columns=group_column, values=value_column)
 
-    # Prepare data for plotting localization error
-    localization_error_data = df[['augmentation', 'Algorithm 1_localization_error', 'Algorithm 2_localization_error',
-                                  'Algorithm 3_localization_error']]
+    # Plot the bar chart
+    pivot_summary.plot(kind='bar', figsize=(12, 6), width=0.8)
 
-    # Plot bars for each algorithm
-    plt.bar(x - bar_width, localization_error_data['Algorithm 1_localization_error'], width=bar_width,
-            label='Algorithm 1', color='b')
-    plt.bar(x, localization_error_data['Algorithm 2_localization_error'], width=bar_width, label='Algorithm 2',
-            color='g')
-    plt.bar(x + bar_width, localization_error_data['Algorithm 3_localization_error'], width=bar_width,
-            label='Algorithm 3', color='r')
-
-    # Labeling
-    plt.xlabel('Augmentation Type')
-    plt.ylabel('Localization Error')
-    plt.title('Localization Error for Different Algorithms and Augmentations')
-    plt.xticks(x, localization_error_data['augmentation'], rotation=45)
-    plt.legend()
+    # Add plot details
+    plt.title(f'Average {metric_value.capitalize()} by {group_column.capitalize()} and {category_column.capitalize()}')
+    plt.ylabel(f'Average {metric_value.capitalize()}')
+    plt.xlabel(category_column.capitalize())
+    plt.xticks(rotation=45)
+    plt.legend(title=group_column.capitalize())
     plt.tight_layout()
     plt.show()
 
 
-def accumulator_to_df(accumulator):
-    rows = []
-    for detector, noise_data in accumulator.items():
-        for noise_type, metrics in noise_data.items():
-            for metric_name, values in metrics.items():
-                for idx, value in enumerate(values):
-                    rows.append({
-                        'detector': detector,
-                        'noise_type': noise_type,
-                        'metric': metric_name,
-                        'index': idx,
-                        'value': value
-                    })
-    df = pd.DataFrame(rows)
-    return df
+def main(**args):
+    """ augmentations and detector/descriptors are defined here, hardcoded. One can add/remove
+    as long as you keep the current structure. """
+    augmentations = {
+        "gauss_noise_10": lambda img: add_gaussian_noise(img, 0, 15),
+        "gauss_noise_20": lambda img: add_gaussian_noise(img, 0, 40),
+        "rotate_30": lambda img: rotate_image(img, 30, 1),
+        "rotate_70": lambda img: rotate_image(img, 70, 1),
+        "scale_half": lambda img: rescale_image(img, 0.5),
+        "scale_2": lambda img: rescale_image(img, 2),
+        "gauss_filter_5": lambda img: (cv2.GaussianBlur(img, ksize=(5, 5), sigmaX=1.), None),
+        "gauss_filter_9": lambda img: (cv2.GaussianBlur(img, ksize=(9, 9), sigmaX=1.), None),
+    }
+    bf_hamm = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    bf_l2norm = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
 
-
-
-
+    detector_descriptor_matcher = {
+        # "harris_brief": (lambda img: apply_harris_with_brief(img), bf_l2norm),
+        "orb": (lambda img: apply_orb_detector(img, 200), bf_hamm),
+        "fast_brief": (lambda img: apply_fast_with_brief(img), bf_hamm),
+        "akaze": (lambda img: apply_akaze_detector(img), bf_l2norm),
+    }
+    images_paths = glob.glob("../data/*")
+    run_eval(images_paths, detector_descriptor_matcher, augmentations, **args)
 
 
 if __name__ == '__main__':
-    images_paths = glob.glob("../data/*")
-    run_eval(images_paths)
+    """ 
+    You can set args or remove it completely if you want images to be untouched.
+    """
+    args = {
+        "image_rescale": (512, 512)
+    }
+    main(**args)
