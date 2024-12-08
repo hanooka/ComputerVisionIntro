@@ -1,3 +1,8 @@
+"""
+Legacy code that was developed during the process.
+No longer used/needed. """
+
+
 def find_harris_detectors_with_rotation():
     _img, kp = apply_harris_detector(img, 2, 3, 0.04, 0.02)
     kp = cluster_keypoints(keypoints=kp, eps=5, min_samples=1)
@@ -13,8 +18,9 @@ def find_harris_detectors_with_rotation():
     r_kp = r_kp[sorted_indices]
 
     match_points = find_matching_points_kdtree(kp, r_kp, 5)
-    #print(match_points)
-    #print(len(kp))
+    # print(match_points)
+    # print(len(kp))
+
 
 def rotate_coordinates(points, image_shape, angle):
     """
@@ -104,6 +110,7 @@ def compute_repeatability_and_error(orig_kps, rotated_kps, max_distance=10):
 
     return repeatability, avg_localization_error
 
+
 def main():
     for image_path in images_paths:
         img = cv2.imread(image_path)
@@ -167,5 +174,31 @@ def main():
         cv2.waitKey(0)
         cv2.imshow('image', rot_img)
         cv2.waitKey(0)
-
         cv2.destroyAllWindows()
+
+
+def cluster_keypoints(keypoints, eps=5, min_samples=1):
+    """
+    Cluster keypoints using DBSCAN to merge nearby points.
+
+    Parameters:
+        keypoints (np.ndarray): Array of detected keypoints as (x, y).
+        eps (float): Maximum distance between points to form a cluster.
+        min_samples (int): Minimum points in a cluster.
+
+    Returns:
+        np.ndarray: Array of clustered keypoints as (x, y).
+    """
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(keypoints)
+    unique_labels = set(clustering.labels_)
+    # print(unique_labels)
+    clustered_keypoints = []
+
+    for label in unique_labels:
+        if label == -1:  # Noise points, optionally handle separately
+            continue
+        cluster = keypoints[clustering.labels_ == label]
+        centroid = cluster.mean(axis=0)  # Compute the cluster centroid
+        clustered_keypoints.append(centroid)
+
+    return np.clip(np.array(clustered_keypoints, dtype=int), a_min=0, a_max=np.inf)
