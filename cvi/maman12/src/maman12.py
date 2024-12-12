@@ -5,6 +5,9 @@ import glob
 
 import numpy as np
 import subprocess
+
+import torch
+import torchvision
 import xgboost as xgb
 from cv2 import Mat
 from sklearn.cluster import KMeans
@@ -12,6 +15,14 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler, normalize
+
+import torch.nn as nn
+import torchvision.models as models
+import torchvision.transforms as transforms
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+from torchvision.models import VGG16_Weights
+from tqdm import tqdm
 
 images_path = os.path.join('../data/images')
 images_paths = glob.glob(os.path.join(images_path, '*.jpg'))
@@ -150,7 +161,98 @@ async def my_train(images_paths, labels, n_clusters=100):
     return clf, files_to_features, le
 
 
-def main():
+class SceneryImageDataset(Dataset):
+    def __init__(self, image_paths, transform=None):
+        self.image_paths = image_paths
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        #img = torchvision.io.read_image(img_path)
+        #img = (img / 255.0 - torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)) / torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        img = Image.open(img_path).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        return img
+
+def get_my_vgg16():
+    model = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
+
+    feature_extractor = nn.Sequential(
+        model.features,
+        nn.AdaptiveAvgPool2d((1, 1)),
+        nn.Flatten()
+    )
+    feature_extractor.eval()
+    return feature_extractor
+
+def question2():
+    labels = extract_labels(images_paths)
+    train_images_paths, test_images_paths, train_labels, test_labels = (
+        train_test_split(images_paths, labels, test_size=0.2, shuffle=True, stratify=labels))
+
+    print(f"Processing: {len(train_images_paths)} images..")
+
+    feature_extractor = get_my_vgg16()
+    transform = transforms.Compose([
+        transforms.ToTensor(),  # Convert to tensor
+        transforms.Normalize(  # Normalize to ImageNet mean and std
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+    batch_size = 32
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataset = SceneryImageDataset(image_paths=train_images_paths, transform=transform)
+    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    feature_extractor.to(device)
+
+    all_features = []
+    with torch.no_grad():  # No need to compute gradients during inference
+        for batch in tqdm(data_loader, desc="Processing batches", unit="batch"):
+            batch = batch.to(device)  # Move batch to the device (GPU/CPU)
+            features = feature_extractor(batch)  # Get features from the model
+            all_features.append(features)
+
+    # Step 10: Combine all features into a single tensor
+    all_features = torch.cat(all_features, dim=0)
+    print(all_features.shape)  # Expected shape: [num_images, 512]
+
+
+def is_this_the_real_life():
+
+    model = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
+
+    feature_extractor = nn.Sequential(
+        model.features,
+        nn.AdaptiveAvgPool2d((1, 1)),
+        nn.Flatten()
+    )
+    print(feature_extractor)
+    # Set the feature extractor to evaluation mode
+    feature_extractor.eval()
+    # Image transformation (maintain original size)
+    transform = transforms.Compose([
+        transforms.ToTensor(),  # Convert to tensor
+        transforms.Normalize(  # Normalize to ImageNet mean and std
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+    # Load an image (original size is maintained)
+    image = Image.open(images_paths[0]).convert("RGB")
+    input_tensor = transform(image).unsqueeze(0)  # Add batch dimension
+    # Forward pass through the feature extractor
+    with torch.no_grad():
+        feat_map = feature_extractor(input_tensor)
+
+    print(feat_map)
+    print(feat_map.shape)
+
+def question1():
     labels = extract_labels(images_paths)
 
     train_images_paths, test_images_paths, train_labels, test_labels = (
@@ -161,13 +263,16 @@ def main():
     clf, files_to_features, le = loop.run_until_complete(my_train(train_images_paths, train_labels))
     test_features = loop.run_until_complete(files_to_features(test_images_paths))
     test_labels = le.transform(test_labels)
-    dtest = xgb.DMatrix(test_features, test_labels)
+    dtest = xgb.DMatrix(test_features)
     y_preds = clf.predict(dtest, iteration_range=(0, clf.best_iteration))
-    print(y_preds)
     roc_auc = roc_auc_score(test_labels, y_preds, multi_class='ovr', average='macro')
     print(f"MACRO ROC AUC: {roc_auc:.4f}")
     roc_auc = roc_auc_score(test_labels, y_preds, multi_class='ovr', average='micro')
     print(f"MICRO ROC AUC: {roc_auc:.4f}")
+
+
+def main():
+    question2()
 
 
 if __name__ == '__main__':
