@@ -289,8 +289,52 @@ def question1():
     print(f"MACRO ROC AUC: {roc_auc:.4f}")
 
 
+import torch.nn.functional as F
+class BasicCNN(nn.Module):
+    def __init__(self, num_classes=10):
+        super(BasicCNN, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, padding=1)  # Output: 32x32x32
+        self.bn1 = nn.BatchNorm2d(32)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)  # Output: 64x32x32
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)  # Output: Halves spatial dimensions
+        self.fc1 = nn.Linear(64 * 8 * 8, 128)  # Assuming input image size is 32x32 (CIFAR-10)
+        self.fc2 = nn.Linear(128, num_classes)
+        self.dropout = nn.Dropout(0.5)
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.bn1(self.conv1(x))))
+        x = self.pool(F.relu(self.bn2(self.conv2(x))))
+        x = x.view(x.size(0), -1)  # Flatten for FC layers
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+
+def q3_training(images_paths, labels, batch_size=32):
+    train_images_paths, val_images_paths, train_labels, val_labels = (
+        train_test_split(images_paths, labels, test_size=0.25, shuffle=True, stratify=labels))
+
+    le = LabelEncoder()
+    train_labels = le.fit_transform(train_labels)
+    val_labels = le.transform(val_labels)
+
+
+
+def question3():
+    labels = extract_labels(images_paths)
+
+    train_images_paths, test_images_paths, train_labels, test_labels = (
+        train_test_split(images_paths, labels, test_size=0.2, shuffle=True, stratify=labels))
+
+
+
+
+
 def main():
-    question2()
+    #question2()
+    question3()
 
 
 if __name__ == '__main__':
