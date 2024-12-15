@@ -20,6 +20,8 @@ import torch.nn as nn
 import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image
+
+from torch import optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import VGG16_Weights
 from tqdm import tqdm
@@ -164,8 +166,9 @@ async def q1_training(images_paths, labels, n_clusters=100):
 
 
 class SceneryImageDataset(Dataset):
-    def __init__(self, image_paths, transform=None):
+    def __init__(self, image_paths, labels=None, transform=None):
         self.image_paths = image_paths
+        self.labels = labels
         self.transform = transform
 
     def __len__(self):
@@ -173,11 +176,17 @@ class SceneryImageDataset(Dataset):
 
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
-        # img = torchvision.io.read_image(img_path)
-        # img = (img / 255.0 - torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)) / torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+        if self.labels is not None:
+            labels = self.labels[idx]
+
         img = Image.open(img_path).convert("RGB")
         if self.transform:
             img = self.transform(img)
+
+        if self.labels is not None:
+            return img, labels
+
         return img
 
 
@@ -291,15 +300,19 @@ def question1():
 
 import torch.nn.functional as F
 class BasicCNN(nn.Module):
-    def __init__(self, num_classes=10):
+    def __init__(self, input_h, input_w, num_classes=8):
         super(BasicCNN, self).__init__()
+
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, padding=1)  # Output: 32x32x32
         self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)  # Output: 64x32x32
         self.bn2 = nn.BatchNorm2d(64)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)  # Output: Halves spatial dimensions
-        self.fc1 = nn.Linear(64 * 8 * 8, 128)  # Assuming input image size is 32x32 (CIFAR-10)
-        self.fc2 = nn.Linear(128, num_classes)
+
+        flattened_size = (input_h // 4) * (input_w // 4) * 64
+
+        self.fc1 = nn.Linear(flattened_size, 256)  # Assuming input image size is 32x32 (CIFAR-10)
+        self.fc2 = nn.Linear(256, num_classes)
         self.dropout = nn.Dropout(0.5)
 
     def forward(self, x):
@@ -312,24 +325,69 @@ class BasicCNN(nn.Module):
         return x
 
 
-def q3_training(images_paths, labels, batch_size=32):
+def q3_training(images_paths, labels, device, batch_size=32, epochs=5):
     train_images_paths, val_images_paths, train_labels, val_labels = (
         train_test_split(images_paths, labels, test_size=0.25, shuffle=True, stratify=labels))
 
     le = LabelEncoder()
     train_labels = le.fit_transform(train_labels)
+    train_labels = torch.tensor(train_labels, dtype=torch.long)
+
     val_labels = le.transform(val_labels)
+    val_labels = torch.tensor(val_labels, dtype=torch.long)
+
+    loss_func = nn.CrossEntropyLoss()
+
+    model = BasicCNN(input_h=256, input_w=256, num_classes=len(le.classes_))
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    transform = get_transform_obj()
+
+    train_dataset = SceneryImageDataset(image_paths=train_images_paths, transform=transform, labels=train_labels)
+    train_data_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+
+    val_dataset = SceneryImageDataset(image_paths=val_images_paths, transform=transform, labels=val_labels)
+    val_data_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    model.train()
+    for epoch in range(epochs):
+        running_loss = 0.0
+        for _inputs, _labels in train_data_loader:
+            _inputs, _labels = _inputs.to(device), _labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(_inputs)
+            loss = loss_func(outputs, _labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+
+        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {running_loss / len(train_data_loader):.4f}")
+
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for _inputs, _labels in val_data_loader:
+            _inputs, _labels = _inputs.to(device), _labels.to(device)
+            outputs = model(_inputs)
+            _, predicted = torch.max(outputs, 1)
+            total += _labels.size(0)
+            correct += (predicted == _labels).sum().item()
+
+    print(f"Accuracy: {100 * correct / total:.2f}%")
 
 
 
 def question3():
+    batch_size = 32
     labels = extract_labels(images_paths)
 
     train_images_paths, test_images_paths, train_labels, test_labels = (
         train_test_split(images_paths, labels, test_size=0.2, shuffle=True, stratify=labels))
 
-
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = q3_training(train_images_paths, train_labels, device, batch_size=batch_size)
 
 
 def main():
