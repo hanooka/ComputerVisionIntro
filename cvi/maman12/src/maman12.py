@@ -1,5 +1,7 @@
 import asyncio
 import os
+from typing import Union
+
 import cv2
 import glob
 
@@ -25,6 +27,8 @@ from torch import optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import VGG16_Weights
 from tqdm import tqdm
+
+from cvi.maman12.src.nn_architectures import my_vgg, BasicCNN, FastCNN
 
 images_path = os.path.join('../data/images')
 images_paths = glob.glob(os.path.join(images_path, '*.jpg'))
@@ -87,7 +91,7 @@ def extract_labels(images_path):
     return list(map(lambda x: os.path.basename(x).split('_')[0], images_path))
 
 
-def cluster_descriptors(descriptors: tuple, n_clusters=100, sample_pct=1., n_init=5, random_state=None) -> KMeans:
+def cluster_descriptors(descriptors: Union[tuple, list], n_clusters=100, sample_pct=1., n_init=5, random_state=None) -> KMeans:
     stacked_descriptors = np.vstack(descriptors)
     num_to_sample = int(sample_pct * stacked_descriptors.shape[0])
     sampled_indices = np.random.choice(stacked_descriptors.shape[0], num_to_sample, replace=False)
@@ -177,17 +181,15 @@ class SceneryImageDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
 
-        if self.labels is not None:
-            labels = self.labels[idx]
-
         img = Image.open(img_path).convert("RGB")
         if self.transform:
             img = self.transform(img)
 
         if self.labels is not None:
+            labels = self.labels[idx]
             return img, labels
-
-        return img
+        else:
+            return img
 
 
 def get_my_vgg16():
@@ -298,33 +300,6 @@ def question1():
     print(f"MACRO ROC AUC: {roc_auc:.4f}")
 
 
-import torch.nn.functional as F
-class BasicCNN(nn.Module):
-    def __init__(self, input_h, input_w, num_classes=8):
-        super(BasicCNN, self).__init__()
-
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, padding=1)  # Output: 32x32x32
-        self.bn1 = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)  # Output: 64x32x32
-        self.bn2 = nn.BatchNorm2d(64)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)  # Output: Halves spatial dimensions
-
-        flattened_size = (input_h // 4) * (input_w // 4) * 64
-
-        self.fc1 = nn.Linear(flattened_size, 256)  # Assuming input image size is 32x32 (CIFAR-10)
-        self.fc2 = nn.Linear(256, num_classes)
-        self.dropout = nn.Dropout(0.5)
-
-    def forward(self, x):
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))
-        x = x.view(x.size(0), -1)  # Flatten for FC layers
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
-
-
 def q3_training(images_paths, labels, device, batch_size=32, epochs=5):
     train_images_paths, val_images_paths, train_labels, val_labels = (
         train_test_split(images_paths, labels, test_size=0.25, shuffle=True, stratify=labels))
@@ -338,10 +313,10 @@ def q3_training(images_paths, labels, device, batch_size=32, epochs=5):
 
     loss_func = nn.CrossEntropyLoss()
 
-    model = BasicCNN(input_h=256, input_w=256, num_classes=len(le.classes_))
+    model = FastCNN(256, 256, len(le.classes_))#my_vgg(num_classes=len(le.classes_), in_dim=3)
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-4)
     transform = get_transform_obj()
 
     train_dataset = SceneryImageDataset(image_paths=train_images_paths, transform=transform, labels=train_labels)
@@ -350,10 +325,14 @@ def q3_training(images_paths, labels, device, batch_size=32, epochs=5):
     val_dataset = SceneryImageDataset(image_paths=val_images_paths, transform=transform, labels=val_labels)
     val_data_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    model.train()
+
     for epoch in range(epochs):
+        print(f"Epoch {epoch+1}:")
+        model.train()
         running_loss = 0.0
+        i = 0
         for _inputs, _labels in train_data_loader:
+            i += 1
             _inputs, _labels = _inputs.to(device), _labels.to(device)
             optimizer.zero_grad()
             outputs = model(_inputs)
@@ -361,21 +340,23 @@ def q3_training(images_paths, labels, device, batch_size=32, epochs=5):
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
+            if i % 10 == 0:
+                print(f"Batch {i}/{len(train_data_loader)}, Loss: {running_loss/(i*10):.4f}")
 
-        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {running_loss / len(train_data_loader):.4f}")
+        print(f"Epoch [{epoch + 1}/{epochs}], Train Loss: {running_loss / len(train_data_loader):.4f}")
 
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for _inputs, _labels in val_data_loader:
-            _inputs, _labels = _inputs.to(device), _labels.to(device)
-            outputs = model(_inputs)
-            _, predicted = torch.max(outputs, 1)
-            total += _labels.size(0)
-            correct += (predicted == _labels).sum().item()
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for _inputs, _labels in val_data_loader:
+                _inputs, _labels = _inputs.to(device), _labels.to(device)
+                outputs = model(_inputs)
+                _, predicted = torch.max(outputs, 1)
+                total += _labels.size(0)
+                correct += (predicted == _labels).sum().item()
 
-    print(f"Accuracy: {100 * correct / total:.2f}%")
+        print(f"Validation Accuracy: {100 * correct / total:.2f}%")
 
 
 
@@ -384,10 +365,10 @@ def question3():
     labels = extract_labels(images_paths)
 
     train_images_paths, test_images_paths, train_labels, test_labels = (
-        train_test_split(images_paths, labels, test_size=0.2, shuffle=True, stratify=labels))
+        train_test_split(images_paths, labels, test_size=0.01, shuffle=True, stratify=labels))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = q3_training(train_images_paths, train_labels, device, batch_size=batch_size)
+    model = q3_training(train_images_paths, train_labels, device, batch_size=batch_size, epochs=100)
 
 
 def main():
