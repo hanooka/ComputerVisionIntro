@@ -29,6 +29,7 @@ from torchvision.models import VGG16_Weights
 from tqdm import tqdm
 
 from cvi.maman12.src.nn_architectures import my_vgg, BasicCNN, FastCNN
+from cvi.maman12.src.plottings import plot_roc_pr_curves
 
 images_path = os.path.join('../data/images')
 images_paths = glob.glob(os.path.join(images_path, '*.jpg'))
@@ -297,6 +298,7 @@ def question1():
     dtest = xgb.DMatrix(test_features)
     y_preds = clf.predict(dtest, iteration_range=(0, clf.best_iteration))
     roc_auc = roc_auc_score(test_labels, y_preds, multi_class='ovr', average='macro')
+    plot_roc_pr_curves(test_labels, y_preds, le.classes_)
     print(f"MACRO ROC AUC: {roc_auc:.4f}")
 
 
@@ -372,7 +374,8 @@ def question3():
 
 
 def main():
-    #question2()
+    question1()
+    question2()
     question3()
 
 
