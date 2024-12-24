@@ -29,7 +29,7 @@ from torchvision.models import VGG16_Weights
 from tqdm import tqdm
 
 from cvi.maman12.src.nn_architectures import my_vgg, BasicCNN, FastCNN
-from cvi.maman12.src.plottings import plot_roc_pr_curves
+from cvi.maman12.src.plottings import plot_roc_pr_cm
 
 images_path = os.path.join('../data/images')
 images_paths = glob.glob(os.path.join(images_path, '*.jpg'))
@@ -231,7 +231,7 @@ def q2_training(images_paths, labels, batch_size, feature_extractor, device):
     dval = xgb.DMatrix(val_features, val_labels)
     watchlist = [(dtrain, 'trn'), (dval, 'val')]
     clf = xgb.train(xgb_args, dtrain, num_boost_round=2000, evals=watchlist, early_stopping_rounds=200, verbose_eval=50)
-    return clf
+    return clf, le
 
 
 def get_features(data_loader: DataLoader, device: torch.device, feature_extractor: torch.nn.Sequential) -> np.ndarray:
@@ -258,8 +258,9 @@ def question2():
         train_test_split(images_paths, labels, test_size=0.2, shuffle=True, stratify=labels))
 
     feature_extractor = get_my_vgg16()
-    clf = q2_training(train_images_paths, train_labels, batch_size, feature_extractor, device)
+    clf, le = q2_training(train_images_paths, train_labels, batch_size, feature_extractor, device)
 
+    test_labels = le.transform(test_labels)
     transform = get_transform_obj()
     test_dataset = SceneryImageDataset(image_paths=test_images_paths, transform=transform)
     test_data_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -271,6 +272,7 @@ def question2():
     y_preds = clf.predict(dtest, iteration_range=(0, clf.best_iteration))
     roc_auc = roc_auc_score(test_labels, y_preds, multi_class='ovr', average='macro')
     print(f"MACRO ROC AUC: {roc_auc:.4f}")
+    plot_roc_pr_cm(test_labels, y_preds, le.classes_)
 
 
 def get_transform_obj():
@@ -298,7 +300,7 @@ def question1():
     dtest = xgb.DMatrix(test_features)
     y_preds = clf.predict(dtest, iteration_range=(0, clf.best_iteration))
     roc_auc = roc_auc_score(test_labels, y_preds, multi_class='ovr', average='macro')
-    plot_roc_pr_curves(test_labels, y_preds, le.classes_)
+    plot_roc_pr_cm(test_labels, y_preds, le.classes_)
     print(f"MACRO ROC AUC: {roc_auc:.4f}")
 
 
@@ -374,9 +376,9 @@ def question3():
 
 
 def main():
-    question1()
+    #question1()
     question2()
-    question3()
+    #question3()
 
 
 if __name__ == '__main__':
