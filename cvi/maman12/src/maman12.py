@@ -10,9 +10,7 @@ import numpy as np
 import subprocess
 
 import torch
-import torchvision
 import xgboost as xgb
-from cv2 import Mat
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import roc_auc_score, accuracy_score
@@ -443,37 +441,27 @@ def question3():
         for _inputs, _labels in test_data_loader:
             _inputs, _labels = _inputs.to(device), _labels.to(device)
 
-            # Get model outputs (probabilities) for ROC AUC calculation
             outputs = model(_inputs)
-            probabilities = torch.nn.functional.softmax(outputs, dim=1)
-
-            # Get the predicted class
             _, predicted = torch.max(outputs, 1)
-
-            # Collect all labels, predictions, and probabilities
             all_labels.extend(_labels.cpu().numpy())
             all_predictions.extend(predicted.cpu().numpy())
-            all_probabilities.extend(probabilities.cpu().numpy())
+            all_probabilities.extend(outputs.cpu().numpy())
 
-    # Convert lists to numpy arrays
     all_labels = np.array(all_labels)
     all_predictions = np.array(all_predictions)
     all_probabilities = np.array(all_probabilities)
 
-    # 1. Accuracy
     accuracy = accuracy_score(all_labels, all_predictions)
     print(f"Test Accuracy: {accuracy * 100:.2f}%")
 
-    # 2. ROC AUC (multi-class)
-    # Since it's multi-class, we compute ROC AUC per class
     roc_auc = roc_auc_score(all_labels, all_probabilities, multi_class='ovr', average='macro')
     print(f"Test ROC AUC (macro): {roc_auc:.4f}")
 
     plot_roc_pr_cm(all_labels, all_probabilities, le.classes_)
 
 def main():
-    #question1()
-    #question2()
+    question1()
+    question2()
     question3()
 
 
