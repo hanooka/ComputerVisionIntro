@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from typing import Union
 
@@ -14,7 +15,7 @@ import xgboost as xgb
 from cv2 import Mat
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, accuracy_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler, normalize
 
@@ -28,8 +29,8 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.models import VGG16_Weights
 from tqdm import tqdm
 
-from cvi.maman12.src.nn_architectures import my_vgg, BasicCNN, FastCNN
-from cvi.maman12.src.plottings import plot_roc_pr_cm
+from cvi.maman12.src.nn_architectures import my_vgg, BasicCNN, FastCNN, OverFitFastCNN
+from cvi.maman12.src.plottings import plot_roc_pr_cm, plot_samples_per_class, plot_metrics
 
 images_path = os.path.join('../data/images')
 images_paths = glob.glob(os.path.join(images_path, '*.jpg'))
@@ -320,7 +321,7 @@ def q3_training(images_paths, labels, device, batch_size=32, epochs=5):
     model = FastCNN(256, 256, len(le.classes_))#my_vgg(num_classes=len(le.classes_), in_dim=3)
     model.to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0001, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e4)
     transform = get_transform_obj()
 
     train_dataset = SceneryImageDataset(image_paths=train_images_paths, transform=transform, labels=train_labels)
@@ -329,56 +330,151 @@ def q3_training(images_paths, labels, device, batch_size=32, epochs=5):
     val_dataset = SceneryImageDataset(image_paths=val_images_paths, transform=transform, labels=val_labels)
     val_data_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
+    metrics = {
+        "epoch": [],
+        "train_loss": [],
+        "train_accuracy": [],
+        "val_loss": [],
+        "val_accuracy": []
+    }
 
+    best_val_accuracy = 87
+    best_model_path = "best_model.pth"
+
+    # if os.path.exists(best_model_path):
+    #     model.load_state_dict(torch.load(best_model_path))
+    #     print(f"Loaded best model from epoch with validation accuracy: {best_val_accuracy:.2f}%")
+
+    print("Training...")
     for epoch in range(epochs):
-        print(f"Epoch {epoch+1}:")
         model.train()
         running_loss = 0.0
-        i = 0
+        correct_train = 0
+        total_train = 0
+
         for _inputs, _labels in train_data_loader:
-            i += 1
             _inputs, _labels = _inputs.to(device), _labels.to(device)
             optimizer.zero_grad()
             outputs = model(_inputs)
             loss = loss_func(outputs, _labels)
             loss.backward()
             optimizer.step()
+
             running_loss += loss.item()
-            if i % 10 == 0:
-                print(f"Batch {i}/{len(train_data_loader)}, Loss: {running_loss/(i*10):.4f}")
+            _, predicted = torch.max(outputs, 1)
+            total_train += _labels.size(0)
+            correct_train += (predicted == _labels).sum().item()
 
-        print(f"Epoch [{epoch + 1}/{epochs}], Train Loss: {running_loss / len(train_data_loader):.4f}")
+        train_loss = running_loss / len(train_data_loader)
+        train_accuracy = 100 * correct_train / total_train
 
+        #Validation
         model.eval()
-        correct = 0
-        total = 0
+        val_loss = 0.0
+        correct_val = 0
+        total_val = 0
+
         with torch.no_grad():
             for _inputs, _labels in val_data_loader:
                 _inputs, _labels = _inputs.to(device), _labels.to(device)
                 outputs = model(_inputs)
+                loss = loss_func(outputs, _labels)
+                val_loss += loss.item()
                 _, predicted = torch.max(outputs, 1)
-                total += _labels.size(0)
-                correct += (predicted == _labels).sum().item()
+                total_val += _labels.size(0)
+                correct_val += (predicted == _labels).sum().item()
 
-        print(f"Validation Accuracy: {100 * correct / total:.2f}%")
+        val_loss /= len(val_data_loader)
+        val_accuracy = 100 * correct_val / total_val
+
+        # Save metrics
+        metrics["epoch"].append(epoch + 1)
+        metrics["train_loss"].append(train_loss)
+        metrics["train_accuracy"].append(train_accuracy)
+        metrics["val_loss"].append(val_loss)
+        metrics["val_accuracy"].append(val_accuracy)
+
+        print(f"Epoch {epoch + 1:>2}/{epochs:<2} | "
+              f"Train Loss: {train_loss:<8.4f} | Train Accuracy: {train_accuracy:<6.2f}% | "
+              f"Val Loss: {val_loss:<8.4f} | Val Accuracy: {val_accuracy:<6.2f}%")
+
+        # Save the best model's weights
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            torch.save(model.state_dict(), best_model_path)
+            #print(f"Best model saved at epoch {epoch + 1} with val accuracy: {val_accuracy:.2f}%")
 
 
+    with open("metrics.json", "w") as f:
+        json.dump(metrics, f, indent=4)
+
+    plot_metrics(metrics)
+
+    # load the best model
+    if os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path))
+        print(f"Loaded best model from epoch with validation accuracy: {best_val_accuracy:.2f}%")
+
+    return model, le
 
 def question3():
     batch_size = 32
     labels = extract_labels(images_paths)
 
     train_images_paths, test_images_paths, train_labels, test_labels = (
-        train_test_split(images_paths, labels, test_size=0.01, shuffle=True, stratify=labels))
+        train_test_split(images_paths, labels, test_size=0.2, shuffle=True, stratify=labels, random_state=1337))
+
+    transform = get_transform_obj()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = q3_training(train_images_paths, train_labels, device, batch_size=batch_size, epochs=100)
+    model, le = q3_training(train_images_paths, train_labels, device, batch_size=batch_size, epochs=100)
 
+    test_labels = le.transform(test_labels)
+    test_labels = torch.tensor(test_labels, dtype=torch.long)
+
+    test_dataset = SceneryImageDataset(image_paths=test_images_paths, labels=test_labels, transform=transform)
+    test_data_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    all_labels = []
+    all_predictions = []
+    all_probabilities = []
+
+    with torch.no_grad():
+        for _inputs, _labels in test_data_loader:
+            _inputs, _labels = _inputs.to(device), _labels.to(device)
+
+            # Get model outputs (probabilities) for ROC AUC calculation
+            outputs = model(_inputs)
+            probabilities = torch.nn.functional.softmax(outputs, dim=1)
+
+            # Get the predicted class
+            _, predicted = torch.max(outputs, 1)
+
+            # Collect all labels, predictions, and probabilities
+            all_labels.extend(_labels.cpu().numpy())
+            all_predictions.extend(predicted.cpu().numpy())
+            all_probabilities.extend(probabilities.cpu().numpy())
+
+    # Convert lists to numpy arrays
+    all_labels = np.array(all_labels)
+    all_predictions = np.array(all_predictions)
+    all_probabilities = np.array(all_probabilities)
+
+    # 1. Accuracy
+    accuracy = accuracy_score(all_labels, all_predictions)
+    print(f"Test Accuracy: {accuracy * 100:.2f}%")
+
+    # 2. ROC AUC (multi-class)
+    # Since it's multi-class, we compute ROC AUC per class
+    roc_auc = roc_auc_score(all_labels, all_probabilities, multi_class='ovr', average='macro')
+    print(f"Test ROC AUC (macro): {roc_auc:.4f}")
+
+    plot_roc_pr_cm(all_labels, all_probabilities, le.classes_)
 
 def main():
     #question1()
-    question2()
-    #question3()
+    #question2()
+    question3()
 
 
 if __name__ == '__main__':
