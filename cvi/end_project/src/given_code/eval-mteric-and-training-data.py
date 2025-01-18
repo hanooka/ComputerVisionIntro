@@ -73,7 +73,8 @@ def NormalizeKeypoints(keypoints, K):
 
 
 def ComputeEssentialMatrix(F, K1, K2, kp1, kp2):
-    '''Compute the Essential matrix from the Fundamental matrix, given the calibration matrices. Note that we ask participants to estimate F, i.e., without relying on known intrinsics.'''
+    '''Compute the Essential matrix from the Fundamental matrix, given the calibration matrices.
+    Note that we ask participants to estimate F, i.e., without relying on known intrinsics.'''
     
     # Warning! Old versions of OpenCV's RANSAC could return multiple F matrices, encoded as a single matrix size 6x3 or 9x3, rather than 3x3.
     # We do not account for this here, as the modern RANSACs do not do this:
@@ -138,7 +139,8 @@ def ExtractSiftFeatures(image, detector, num_features):
 def ComputeErrorForOneExample(q_gt, T_gt, q, T, scale):
     '''Compute the error metric for a single example.
     
-    The function returns two errors, over rotation and translation. These are combined at different thresholds by ComputeMaa in order to compute the mean Average Accuracy.'''
+    The function returns two errors, over rotation and translation.
+    These are combined at different thresholds by Compute Maa in order to compute the mean Average Accuracy.'''
     
     q_gt_norm = q_gt / (np.linalg.norm(q_gt) + eps)
     q_norm = q / (np.linalg.norm(q) + eps)
