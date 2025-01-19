@@ -21,7 +21,7 @@ device = torch.device('cuda')
 matcher = KF.LoFTR()
 matcher = matcher.to(device).eval()
 
-src = '../../data/'
+src = '../../data/cv-22928-2025-a-project/'
 output_file = 'submission.csv'
 checkpoint_file = 'submission_checkpoint.json'
 
@@ -68,19 +68,28 @@ for i, row in enumerate(test_samples):
 
     with torch.no_grad():
         correspondences = matcher(input_dict)
-        print(correspondences)
+        #print(correspondences)
 
     # Why not take only points with high confidence
 
-    mkpts0 = correspondences['keypoints0'].cpu().numpy()
-    mkpts1 = correspondences['keypoints1'].cpu().numpy()
+    mkpts0 = correspondences['keypoints0']
+    mkpts1 = correspondences['keypoints1']
+
+    mask = correspondences['confidence'] > 0.5
+
+    print(sum(mask))
+
+    mkpts1 = mkpts1[mask].cpu().numpy()
+    mkpts0 = mkpts0[mask].cpu().numpy()
 
     print(mkpts0.shape)
     print(mkpts1.shape)
 
+
     if len(mkpts0) > 7:
-        F, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.200, 0.9999, 250000)
+        F, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.25, 0.99999, 100000)
         inliers = inliers > 0
+        print("inliners", sum(inliers))
         assert F.shape == (3, 3), 'Malformed F?'
         F_dict[sample_id] = F
     else:
