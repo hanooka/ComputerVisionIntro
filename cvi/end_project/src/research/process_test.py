@@ -20,7 +20,7 @@ device = torch.device('cuda')
 matcher = KF.LoFTR(pretrained='outdoor')
 matcher = matcher.to(device).eval()
 
-data_fldr = '../../data/'
+data_fldr = '../../data/cv-22928-2025-a-project/'
 output_file = 'submission.csv'
 checkpoint_file = 'submission_checkpoint.json'
 
@@ -38,17 +38,20 @@ with open(f'{data_fldr}/test.csv') as f:
 def FlattenMatrix(M, num_digits=8):
     '''Convenience function to write CSV files.'''
 
-    return ' '.join([f'{v:.{num_digits}e}' for v in M.flatten()])
+    if isinstance(M, np.ndarray):
+        return ' '.join([f'{v:.{num_digits}e}' for v in M.flatten()])
+    else:
+        return M
 
 
 def load_torch_image(fname, device):
-    img = cv2.imread(fname)
-    scale = 840 / max(img.shape[0], img.shape[1])
-    w = int(img.shape[1] * scale)
-    h = int(img.shape[0] * scale)
-    img = cv2.resize(img, (w, h))
+    img = cv2.cvtColor(cv2.imread(fname), cv2.COLOR_BGR2RGB)
+    #scale = 840 / max(img.shape[0], img.shape[1])
+    #w = int(img.shape[1] * scale)
+    #h = int(img.shape[0] * scale)
+    #img = cv2.resize(img, (w, h))
     img = K.image_to_tensor(img, False).float() / 255.
-    img = K.color.bgr_to_rgb(img)
+    #img = K.color.bgr_to_rgb(img)
     return img.to(device)
 
 
@@ -61,6 +64,9 @@ async def process(row, semaphore: asyncio.Semaphore):
                 load_torch_image, f'{data_fldr}/test_images/{batch_id}/{image_1_id}.jpg', device)
             image_2 = await asyncio.to_thread(
                 load_torch_image, f'{data_fldr}/test_images/{batch_id}/{image_2_id}.jpg', device)
+
+            # image_1 = load_torch_image(f'{data_fldr}/test_images/{batch_id}/{image_1_id}.jpg', device)
+            # image_2 = load_torch_image(f'{data_fldr}/test_images/{batch_id}/{image_2_id}.jpg', device)
             # print(image_1.shape)
             input_dict = {
                 "image0": K.color.rgb_to_grayscale(image_1),
@@ -70,12 +76,16 @@ async def process(row, semaphore: asyncio.Semaphore):
             with torch.no_grad():
                 correspondences = matcher(input_dict)
 
-            mkpts0 = correspondences['keypoints0'].cpu().numpy()
-            mkpts1 = correspondences['keypoints1'].cpu().numpy()
+            mkpts0 = correspondences['keypoints0']
+            mkpts1 = correspondences['keypoints1']
+            mask = correspondences['confidence'] > 0.3
 
-            if len(mkpts0) > 7:
+            mkpts1 = mkpts1[mask].cpu().numpy()
+            mkpts0 = mkpts0[mask].cpu().numpy()
+
+            if len(mkpts0) >= 8:
                 F, inliers = await asyncio.to_thread(
-                    cv2.findFundamentalMat, mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.25, 0.99999, 100000)
+                    cv2.findFundamentalMat, mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.2, 0.9999, 50000)
                 inliers = inliers > 0
                 try:
                     assert F.shape == (3, 3), 'Malformed F?'
@@ -83,9 +93,17 @@ async def process(row, semaphore: asyncio.Semaphore):
                     print(e)
             else:
                 F = np.zeros((3, 3))
+
+            del image_1, image_2, input_dict, correspondences
+            torch.cuda.empty_cache()
+            gc.collect()
             return sample_id, F
+
         except Exception as e:
             print(e)
+            del image_1, image_2, input_dict, correspondences
+            torch.cuda.empty_cache()
+            gc.collect()
             return sample_id, np.zeros((3, 3))
 
 
@@ -112,7 +130,7 @@ def load_checkpoint():
 
 
 async def main():
-    semaphore = asyncio.Semaphore(35)
+    semaphore = asyncio.Semaphore(5)
     batch_size = 1000
 
     # Load checkpoint
@@ -128,6 +146,7 @@ async def main():
         if not processed_samples:
             f.write('sample_id,fundamental_matrix\n')
 
+
         for batch_index in range(start_batch, len(test_samples) // batch_size + 1):
             start_idx = batch_index * batch_size
             end_idx = min((batch_index + 1) * batch_size, len(test_samples))
@@ -141,9 +160,10 @@ async def main():
             for sample_id, F in results:
                 f.write(f'{sample_id},{FlattenMatrix(F)}\n')
 
+
             # Update checkpoint
             save_checkpoint(batch_index + 1, processed_samples + results)
-            gc.collect()
+
             print(f"Completed batch {batch_index + 1}.")
 
 
