@@ -44,15 +44,34 @@ def FlattenMatrix(M, num_digits=8):
         return M
 
 
-def load_torch_image(fname, device):
-    img = cv2.cvtColor(cv2.imread(fname), cv2.COLOR_BGR2RGB)
-    #scale = 840 / max(img.shape[0], img.shape[1])
-    #w = int(img.shape[1] * scale)
-    #h = int(img.shape[0] * scale)
-    #img = cv2.resize(img, (w, h))
+def get_loftr_matches(img1, img2, matcher):
+    """ Given img1, img2 and matcher (which is LoFTR torch.model)
+    returns the matching key points 0, 1, and confidence by LoFTR. """
+    input_dict = {
+        "image0": K.color.rgb_to_grayscale(img1),
+        "image1": K.color.rgb_to_grayscale(img2),
+    }
+    with torch.no_grad():
+        correspondences = matcher(input_dict)
+
+    mkpts0 = correspondences['keypoints0']
+    mkpts1 = correspondences['keypoints1']
+    conf = correspondences['confidence']
+
+    return mkpts0, mkpts1, conf
+
+
+def load_torch_image(fname, device, re_scale=840):
+    """ Load through cv2, convert to torch tensor, rescale/resize and return Tensor, scale_h, scale_w """
+    #img = cv2.cvtColor(cv2.imread(fname), cv2.COLOR_BGR2RGB)
+    img = cv2.imread(fname)
+    scale = re_scale / max(img.shape[0], img.shape[1])
+    h = int(img.shape[0] * scale)
+    w = int(img.shape[1] * scale)
+    img = cv2.resize(img, (w, h))
     img = K.image_to_tensor(img, False).float() / 255.
-    #img = K.color.bgr_to_rgb(img)
-    return img.to(device)
+    img = K.color.bgr_to_rgb(img)
+    return img.to(device), h / img.shape[0], w / img.shape[1]
 
 
 async def process(row, semaphore: asyncio.Semaphore):
@@ -68,17 +87,8 @@ async def process(row, semaphore: asyncio.Semaphore):
             # image_1 = load_torch_image(f'{data_fldr}/test_images/{batch_id}/{image_1_id}.jpg', device)
             # image_2 = load_torch_image(f'{data_fldr}/test_images/{batch_id}/{image_2_id}.jpg', device)
             # print(image_1.shape)
-            input_dict = {
-                "image0": K.color.rgb_to_grayscale(image_1),
-                "image1": K.color.rgb_to_grayscale(image_2)
-            }
-
-            with torch.no_grad():
-                correspondences = matcher(input_dict)
-
-            mkpts0 = correspondences['keypoints0']
-            mkpts1 = correspondences['keypoints1']
-            mask = correspondences['confidence'] > 0.3
+            mkpts0, mkpts1, conf = get_loftr_matches(image_1, image_2, matcher)
+            mask = conf > 0.3
 
             mkpts1 = mkpts1[mask].cpu().numpy()
             mkpts0 = mkpts0[mask].cpu().numpy()
