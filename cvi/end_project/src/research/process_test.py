@@ -6,8 +6,10 @@ import cv2
 import csv
 from glob import glob
 import torch
+import torchvision
 import matplotlib.pyplot as plt
 import kornia
+from cv2 import Mat
 from kornia_moons.feature import *
 import kornia as K
 import kornia.feature as KF
@@ -61,17 +63,19 @@ def get_loftr_matches(img1, img2, matcher):
     return mkpts0, mkpts1, conf
 
 
-def load_torch_image(fname, device, re_scale=840):
-    """ Load through cv2, convert to torch tensor, rescale/resize and return Tensor, scale_h, scale_w """
-    #img = cv2.cvtColor(cv2.imread(fname), cv2.COLOR_BGR2RGB)
-    img = cv2.imread(fname)
+def get_tensor_from_np(img: Mat, device, re_scale=1080) -> (torch.Tensor, float, float):
+    """ given image and rescale, calculates scale factor. resizing and converting to tensor.
+    returns the tensor together with the scales to transpose back to original scale. """
     scale = re_scale / max(img.shape[0], img.shape[1])
     h = int(img.shape[0] * scale)
     w = int(img.shape[1] * scale)
+    scale_h = h / img.shape[0]
+    scale_w = w / img.shape[1]
     img = cv2.resize(img, (w, h))
-    img = K.image_to_tensor(img, False).float() / 255.
+    img = K.image_to_tensor(img, keepdim=False).float() / 255
+    # cv2 imread, converted image to BGR. here we transform to RGB.
     img = K.color.bgr_to_rgb(img)
-    return img.to(device), h / img.shape[0], w / img.shape[1]
+    return img.to(device), scale_h, scale_w
 
 
 async def process(row, semaphore: asyncio.Semaphore):
@@ -79,24 +83,27 @@ async def process(row, semaphore: asyncio.Semaphore):
         sample_id, batch_id, image_1_id, image_2_id = row
         try:
             # Load the images.
-            image_1 = await asyncio.to_thread(
-                load_torch_image, f'{data_fldr}/test_images/{batch_id}/{image_1_id}.jpg', device)
-            image_2 = await asyncio.to_thread(
-                load_torch_image, f'{data_fldr}/test_images/{batch_id}/{image_2_id}.jpg', device)
+            img_1 = await asyncio.to_thread(cv2.imread, f'{data_fldr}/test_images/{batch_id}/{image_1_id}.jpg')
+            img_2 = await asyncio.to_thread(cv2.imread, f'{data_fldr}/test_images/{batch_id}/{image_2_id}.jpg')
+            image_1, img1_h_scale, img1_w_scale = get_tensor_from_np(img_1, device, 1080)
+            image_2, img2_h_scale, img2_w_scale = get_tensor_from_np(img_2, device, 1080)
 
-            # image_1 = load_torch_image(f'{data_fldr}/test_images/{batch_id}/{image_1_id}.jpg', device)
-            # image_2 = load_torch_image(f'{data_fldr}/test_images/{batch_id}/{image_2_id}.jpg', device)
-            # print(image_1.shape)
             mkpts0, mkpts1, conf = get_loftr_matches(image_1, image_2, matcher)
-            mask = conf > 0.3
 
+            # transforming points to original scale
+            mkpts0[:, 0] /= img1_h_scale
+            mkpts0[:, 1] /= img1_w_scale
+            mkpts1[:, 0] /= img2_h_scale
+            mkpts1[:, 1] /= img2_w_scale
+
+            mask = conf > 0.1
             mkpts1 = mkpts1[mask].cpu().numpy()
             mkpts0 = mkpts0[mask].cpu().numpy()
 
             if len(mkpts0) >= 8:
                 F, inliers = await asyncio.to_thread(
-                    cv2.findFundamentalMat, mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.2, 0.9999, 50000)
-                inliers = inliers > 0
+                    cv2.findFundamentalMat, mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.2, 0.99999, 100000)
+                #inliers = inliers > 0
                 try:
                     assert F.shape == (3, 3), 'Malformed F?'
                 except AssertionError as e:
@@ -104,14 +111,14 @@ async def process(row, semaphore: asyncio.Semaphore):
             else:
                 F = np.zeros((3, 3))
 
-            del image_1, image_2, input_dict, correspondences
+            del image_1, image_2
             torch.cuda.empty_cache()
             gc.collect()
             return sample_id, F
 
         except Exception as e:
             print(e)
-            del image_1, image_2, input_dict, correspondences
+            del image_1, image_2
             torch.cuda.empty_cache()
             gc.collect()
             return sample_id, np.zeros((3, 3))
@@ -140,7 +147,7 @@ def load_checkpoint():
 
 
 async def main():
-    semaphore = asyncio.Semaphore(5)
+    semaphore = asyncio.Semaphore(10)
     batch_size = 1000
 
     # Load checkpoint
@@ -156,7 +163,6 @@ async def main():
         if not processed_samples:
             f.write('sample_id,fundamental_matrix\n')
 
-
         for batch_index in range(start_batch, len(test_samples) // batch_size + 1):
             start_idx = batch_index * batch_size
             end_idx = min((batch_index + 1) * batch_size, len(test_samples))
@@ -169,7 +175,6 @@ async def main():
             # Write results to the output file
             for sample_id, F in results:
                 f.write(f'{sample_id},{FlattenMatrix(F)}\n')
-
 
             # Update checkpoint
             save_checkpoint(batch_index + 1, processed_samples + results)
