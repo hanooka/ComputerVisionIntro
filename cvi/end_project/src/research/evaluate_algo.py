@@ -1,4 +1,5 @@
 import os
+import gc
 import sys
 import cv2
 import csv
@@ -43,10 +44,14 @@ async def calculate_f_and_error(scene, pair, semaphore, print_lock, calib_dict, 
     async with semaphore:
         id1, id2 = pair.split('-')
 
+        # We take the minimum between loftr_scale and max(h, w) of current image.
+        img_1_rescale = min(loftr_scale, max(images_dict[id1].shape[0], images_dict[id1].shape[1]))
+        img_2_rescale = min(loftr_scale, max(images_dict[id2].shape[0], images_dict[id2].shape[1]))
+
         image_1, img1_h_scale, img1_w_scale = await asyncio.to_thread(
-            get_tensor_from_np, images_dict[id1], device, loftr_scale)
+            get_tensor_from_np, images_dict[id1], device, img_1_rescale)
         image_2, img2_h_scale, img2_w_scale = await asyncio.to_thread(
-            get_tensor_from_np, images_dict[id2], device, loftr_scale)
+            get_tensor_from_np, images_dict[id2], device, img_2_rescale)
 
         mkpts0, mkpts1, conf = get_loftr_matches(image_1, image_2, matcher)
 
@@ -60,8 +65,8 @@ async def calculate_f_and_error(scene, pair, semaphore, print_lock, calib_dict, 
         mkpts0 = mkpts0[mask].cpu().numpy()
         mkpts1 = mkpts1[mask].cpu().numpy()
 
-        F, inliers = await asyncio.to_thread(cv2.findFundamentalMat, mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.2, 0.9999,
-                                             100000)
+        F, inliers = await asyncio.to_thread(
+            cv2.findFundamentalMat, mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.2, 0.9999, 100000)
 
         # Compute the error for this example.
         err_q, err_t = await compute_error(scene, mkpts0, mkpts1, F, inliers, id1, id2, calib_dict, scaling_dict)
@@ -69,6 +74,9 @@ async def calculate_f_and_error(scene, pair, semaphore, print_lock, calib_dict, 
         async with print_lock:
             print(f'{pair}, err_q={(err_q):.02f} (deg), err_t={(err_t):.02f} (m)', flush=True)
 
+        del mkpts0, mkpts1, image_1, image_2
+        torch.cuda.empty_cache()
+        gc.collect()
         return {
             "scene": scene,
             "pair": pair,
